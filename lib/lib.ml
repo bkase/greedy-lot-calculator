@@ -26,6 +26,34 @@ module Lot_entry = struct
   let price t = t.price
   let date t = t.date
 
+  exception ParseError of string
+
+  module Parse = struct
+    let of_triple (date, amt, price) =
+        { id = Id.next ()
+        ; date = Time_ns.of_string_with_utc_offset (Core.sprintf "%sT00:00:00Z" date)
+        ; amount = Bignum.of_string amt
+        ; price = Bignum.of_string price
+        }
+
+    let of_simple ss = match ss with
+      | [date; amt; price] -> of_triple (date, amt, price)
+      | _ -> raise (ParseError "list not formatted as [date;amt;price]")
+
+    let%test_unit "simple parses correctly" =
+      let _simple = of_simple ["2021-02-07"; "181.2777"; "1.7882"] in
+      (*Core.printf !"Parsed %{sexp: t}\n" simple*)
+      ()
+
+    let of_more ss = match ss with
+      | [date; price; _; _; _; _; _; _; _; amt; _; _] -> of_triple (date, amt, price)
+      | _ -> raise (ParseError "list not formatted as [date;price;_*7;amount]")
+    let%test_unit "more parses correctly" =
+      let _more = of_more ["2021-07-08"; "4.283872034873"; "";"";"";"";"";"";"";"18.883723";"";""] in
+      (*Core.printf !"Parsed %{sexp: t}\n" more*)
+      ()
+  end
+
   module For_tests = struct
     let zero = { id = Id.next (); date = Time_ns.epoch; amount = Bignum.zero; price = Bignum.zero }
 
@@ -133,6 +161,5 @@ let%test_module "Contexts" = (module struct
     add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 3.)));
     add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 5.)));
     [%test_eq: Time_ns.Alternate_sexp.t List.t] (heap_to_list h |> List.map ~f:(fun s -> (Lot.view s) |> Lot_entry.date)) Time_ns.[epoch; timed 3; timed 5; timed2 10]
-
 
 end)

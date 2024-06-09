@@ -1,8 +1,8 @@
 (library
  (name lib)
  (public_name lot_calc.lib)
- (libraries core core_kernel.hash_heap ppx_deriving ppx_jane bignum)
+ (libraries core core_kernel.hash_heap ppx_deriving ppx_jane bignum csv)
  (preprocess
   (pps ppx_deriving.std ppx_jane ppx_inline_test))
  (inline_tests)
- (modules lib context))
+ (modules lib context loader))
