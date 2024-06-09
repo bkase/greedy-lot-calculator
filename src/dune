@@ -1,0 +1,12 @@
+(executable
+ (name main)
+ (libraries
+  core
+  core_kernel.hash_heap
+  ppx_deriving
+  ppx_jane
+  lot_calc.lib
+  bignum)
+ (preprocess
+  (pps ppx_deriving.std ppx_jane ppx_inline_test))
+ (modules main))
