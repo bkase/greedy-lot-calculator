@@ -2,6 +2,13 @@ open Core
 
 include Context
 
+module Constants = struct
+  let genesis_time =
+    Time_ns.of_string_with_utc_offset "2021-03-17T00:00:00Z"
+
+  let slot_time_mins = 3
+end
+
 module Id : sig
   type t [@@deriving hash, sexp, compare]
 
@@ -54,6 +61,8 @@ module Lot_entry = struct
       ()
   end
 
+  let dummy_date = Time_ns.of_string_with_utc_offset "2022-06-06T00:00:00Z";
+
   module For_tests = struct
     let zero = { id = Id.next (); date = Time_ns.epoch; amount = Bignum.zero; price = Bignum.zero }
 
@@ -62,25 +71,122 @@ module Lot_entry = struct
   end
 end
 
-module Curve = struct
-  type t = Todo
+module Timing = struct
+  (* note: vesting period always 1 *)
+  type t =
+    { initial_minimum_balance: Bignum.t
+    ; cliff_time: int
+    ; cliff_amount: Bignum.t
+    ; vesting_increment: Bignum.t
+    }
     [@@deriving hash, sexp, compare]
 end
 
 module Lot = struct
   type t =
     | Static of Lot_entry.t
-    | Vesting of Curve.t * [`Adjusted of Bignum.t]
+    | Vesting of Timing.t * Lot_entry.t
     [@@deriving hash, sexp, compare]
 
-  let view t = match t with
+  let time_to_slot at =
+    let span = Time_ns.abs_diff at Constants.genesis_time in
+    Int.of_float (Time_ns.Span.to_min span /. Float.of_int Constants.slot_time_mins)
+
+  let liquid (at : Time_ns.t) (timing : Timing.t) =
+    let global_slot = time_to_slot at in
+    let before_cliff =
+      global_slot < timing.cliff_time in
+    if before_cliff then
+      Bignum.zero
+    else
+      let num_periods = global_slot - timing.cliff_time in
+      let min_balance_less_cliff_decrement =
+        Bignum.(timing.initial_minimum_balance - timing.cliff_amount)
+      in
+      let vesting_decrement =
+        Bignum.(of_int num_periods * timing.vesting_increment)
+      in
+      let res =
+        Bignum.(min_balance_less_cliff_decrement - vesting_decrement)
+      in
+      let clamped =
+        Bignum.(if res < zero then zero else res)
+      in
+      Bignum.(timing.initial_minimum_balance - clamped)
+
+      (* synthesize a static lot from a vesting one taking into account
+         liquidity and how much was spent out of it *)
+  let synthesize at timing e =
+    (* imagine we start at 100
+        now there's 5 liquid
+        we spend 2
+
+    we need to compute that there's 3 left liquid, but 98 total left
+
+    initial_minimum_balance = 100
+    balance = 98
+    liquid_at = 5
+
+    5 - (100-98) *)
+
+    let open Bignum in
+    { e with Lot_entry.amount = (liquid at timing) - (timing.initial_minimum_balance - e.Lot_entry.amount) }
+
+   let%test_module "liquidity tests" = (module struct
+      let timing =
+        { Timing.cliff_time = 500
+        ; initial_minimum_balance = Bignum.of_int 100
+        ; cliff_amount = Bignum.of_int 50
+        ; vesting_increment = Bignum.of_string "0.1"
+        }
+
+      let entry100 = { Lot_entry.For_tests.zero with amount = timing.initial_minimum_balance }
+
+    let%test_unit "fully liquid" =
+      let full_liquid100 =
+        liquid (Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z") timing
+      in
+      [%test_eq : Bignum.t] (Bignum.of_int 100) full_liquid100
+
+    let%test_unit "before cliff" =
+      let cliff100 =
+        liquid (Time_ns.add_saturating Constants.genesis_time (Time_ns.Span.of_min 30.)) timing
+      in
+      [%test_eq : Bignum.t] Bignum.zero cliff100
+
+    let%test_unit "after cliff, midvest" =
+      let cliff100 =
+        liquid (Time_ns.add_saturating Constants.genesis_time (Time_ns.Span.of_min 1507.)) timing
+      in
+      [%test_eq : Bignum.t] (Bignum.of_string "50.2") cliff100
+
+    let%test_unit "synthesis idempotent no sends" =
+      let cliff100 =
+        synthesize (Time_ns.add_saturating Constants.genesis_time (Time_ns.Span.of_min 1507.)) timing entry100
+      in
+      [%test_eq : Lot_entry.t] { entry100 with amount = Bignum.of_string "50.2" } cliff100
+
+    let%test_unit "synthesis tracks some sends" =
+      let cliff100 =
+        synthesize (Time_ns.add_saturating Constants.genesis_time (Time_ns.Span.of_min 1507.)) timing { entry100 with amount = Bignum.of_int 95 }
+      in
+      [%test_eq : Lot_entry.t] { entry100 with amount = Bignum.of_string "45.2" } cliff100
+
+    let%test_unit "synthesis handles fully liquid with sends" =
+      let cliff100 =
+        synthesize (Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z") timing { entry100 with amount = Bignum.of_int 95 }
+      in
+      [%test_eq : Lot_entry.t] { entry100 with amount = Bignum.of_int 95 } cliff100
+  end)
+
+  let view at t = match t with
       Static e -> e
-    | Vesting (_c, (`Adjusted _b)) -> failwith "todo vesting view"
+    | Vesting (timing, e) -> synthesize at timing e
 
   let s e = Static e
 
-  let v1 (f : Lot_entry.t -> 'a) t = f (view t)
-  let v2 (f : Lot_entry.t -> Lot_entry.t -> 'a) t1 t2 = f (view t1) (view t2)
+  let v1 at (f : Lot_entry.t -> 'a) t = f (view at t)
+  let v2 at (f : Lot_entry.t -> Lot_entry.t -> 'a) t1 t2 = f (view at t1) (view at t2)
 end
 
 module Heap = Hash_heap.Make(Id)
@@ -97,12 +203,14 @@ module Context = struct
     ; long_gains_tax : Bignum.t
     }
 
-  let high_priced_heap () = Heap.create (Lot.v2 (fun e1 e2 -> Bignum.compare e2.price e1.price))
-  let oldest_date_heap () = Heap.create (Lot.v2 (fun e1 e2 -> Time_ns.compare e1.date e2.date))
+  let v' = Lot.v2 Lot_entry.dummy_date
+
+  let high_priced_heap () = Heap.create (v' (fun e1 e2 -> Bignum.compare e2.price e1.price))
+  let oldest_date_heap () = Heap.create (v' (fun e1 e2 -> Time_ns.compare e1.date e2.date))
 
   let create () =
-    let high_priced_heap () = Heap.create (Lot.v2 (fun e1 e2 -> Bignum.compare e1.price e2.price)) in
-    let oldest_date_heap () = Heap.create (Lot.v2 (fun e1 e2 -> Time_ns.compare e1.date e2.date)) in
+    let high_priced_heap () = Heap.create (v' (fun e1 e2 -> Bignum.compare e1.price e2.price)) in
+    let oldest_date_heap () = Heap.create (v' (fun e1 e2 -> Time_ns.compare e1.date e2.date)) in
     { mixed_lots = high_priced_heap ()
     ; short_term_dates = oldest_date_heap ()
     ; short_term_lots = high_priced_heap ()
@@ -142,7 +250,7 @@ let%test_module "Contexts" = (module struct
     add (z (Bignum.of_int 5));
     add (z (Bignum.of_int 20));
     add (z (Bignum.of_int 1));
-    [%test_eq: Bignum.t List.t] (heap_to_list h |> List.map ~f:(fun s -> (Lot.view s) |> Lot_entry.price)) Bignum.[of_int 20; of_int 10; of_int 5; of_int 1; of_int 0]
+    [%test_eq: Bignum.t List.t] (heap_to_list h |> List.map ~f:(fun s -> (Lot.view Lot_entry.dummy_date s) |> Lot_entry.price)) Bignum.[of_int 20; of_int 10; of_int 5; of_int 1; of_int 0]
 
   let%test_unit "oldest heap does oldest dates first" =
     let h = Context.oldest_date_heap () in
@@ -160,6 +268,6 @@ let%test_module "Contexts" = (module struct
     add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 10.)));
     add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 3.)));
     add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 5.)));
-    [%test_eq: Time_ns.Alternate_sexp.t List.t] (heap_to_list h |> List.map ~f:(fun s -> (Lot.view s) |> Lot_entry.date)) Time_ns.[epoch; timed 3; timed 5; timed2 10]
+    [%test_eq: Time_ns.Alternate_sexp.t List.t] (heap_to_list h |> List.map ~f:(fun s -> (Lot.view Lot_entry.dummy_date s) |> Lot_entry.date)) Time_ns.[epoch; timed 3; timed 5; timed2 10]
 
 end)
