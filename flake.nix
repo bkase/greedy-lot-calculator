@@ -29,6 +29,7 @@
             pkgs.ocamlPackages.ppx_deriving
             pkgs.ocamlPackages.ppx_inline_test
             pkgs.ocamlPackages.bignum
+            pkgs.ocamlPackages.ocamlformat
           ];
           shellHook = ''
             echo "Welcome to the OCaml development environment on ${system}!"
