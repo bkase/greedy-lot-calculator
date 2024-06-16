@@ -1,5 +1,5 @@
 open Core
-include Context
+include Loader
 
 module Constants = struct
   let genesis_time = Time_ns.of_string_with_utc_offset "2021-03-17T00:00:00Z"
@@ -25,6 +25,7 @@ module Lot_entry = struct
     ; date : Time_ns.Alternate_sexp.t
     ; amount : Bignum.t
     ; price : Bignum.t
+    ; metadata : string option
     }
   [@@deriving hash, sexp, compare]
 
@@ -39,12 +40,13 @@ module Lot_entry = struct
   exception ParseError of string
 
   module Parse = struct
-    let of_triple (date, amt, price) =
+    let of_triple ?metadata (date, amt, price) =
       { id = Id.next ()
       ; date =
           Time_ns.of_string_with_utc_offset (Core.sprintf "%sT00:00:00Z" date)
       ; amount = Bignum.of_string amt
       ; price = Bignum.of_string price
+      ; metadata
       }
 
     let of_simple ss =
@@ -61,8 +63,8 @@ module Lot_entry = struct
 
     let of_more ss =
       match ss with
-      | [ date; price; _; _; _; _; _; _; _; amt; _; _ ] ->
-          of_triple (date, amt, price)
+      | [ date; price; _; _; _; _; _; txn_id; _; amt; _; _ ] ->
+          of_triple ~metadata:txn_id (date, amt, price)
       | _ ->
           raise (ParseError "list not formatted as [date;price;_*7;amount]")
 
@@ -76,14 +78,14 @@ module Lot_entry = struct
           ; ""
           ; ""
           ; ""
-          ; ""
+          ; "Ckfoo"
           ; ""
           ; "18.883723"
           ; ""
           ; ""
           ]
       in
-      (*Core.printf !"Parsed %{sexp: t}\n" more*)
+      (*Core.printf !"Parsed %{sexp: t}\n" _more ;*)
       ()
   end
 
@@ -95,6 +97,7 @@ module Lot_entry = struct
       ; date = Time_ns.epoch
       ; amount = Bignum.zero
       ; price = Bignum.zero
+      ; metadata = None
       }
 
     let another_priced t p = { t with id = Id.next (); price = p }
@@ -243,7 +246,7 @@ module Lot = struct
     let compare x x' =
       (* safe because we don't care about amounts here, only the dates *)
       let (`Comment_why_its_safe v) = view_unsafe in
-      Lot_entry.compare (v x) (v x')
+      Lot_entry.Compare_earliest.compare (v x) (v x')
   end
 
   let s e = Static e
@@ -273,7 +276,8 @@ module Demux = struct
           | [] ->
               ()
           | x :: _ ->
-              best := Some (better (i, x) !best) ) ;
+              let best' = better (i, x) !best in
+              best := Some best' ) ;
 
       match !best with
       | None ->
@@ -305,8 +309,7 @@ module Demux = struct
         let c' =
           { b' with
             Lot_entry.date =
-              Time_ns.add Lot_entry.For_tests.zero.date
-                (Time_ns.Span.of_min 10.)
+              Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z"
           }
         in
         let a = Lot.Static a' in
@@ -320,8 +323,12 @@ module Demux = struct
       let%test_unit "demuxes ints properly" =
         [%test_eq: int list]
           (demux ~compare:Int.compare
-             [ [ 3; 4; 10; 20 ]; [ 1; 2; 10; 200; 300 ]; [ 2; 4; 6; 8 ] ] )
-          [ 1; 2; 2; 3; 4; 4; 6; 8; 10; 10; 20; 200; 300 ]
+             [ [ 3; 4; 10; 20 ]
+             ; [ 1; 2; 10; 200; 300 ]
+             ; [ 2; 4; 6; 8 ]
+             ; [ 1000 ]
+             ] )
+          [ 1; 2; 2; 3; 4; 4; 6; 8; 10; 10; 20; 200; 300; 1000 ]
     end )
 end
 

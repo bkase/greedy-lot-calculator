@@ -2,14 +2,37 @@ let cwd () = Sys.getcwd ()
 
 open Core
 
-let read dir =
-  let ic = In_channel.create (dir ^ "/sample.csv") in
-  let _csv = Csv.load_in ic in
-  In_channel.close ic ;
-  (*Core.printf !"list: %{sexp: string list list}\n" csv*)
-  ()
+module Config = struct
+  type t =
+    { csv_dir : string
+    ; simple_csvs_basenames : string list
+    ; more_csvs_basenames : string list
+    }
 
-let%test_module "Csv loader" =
-  ( module struct
-    let%test_unit "read sample" = read "../../../"
-  end )
+  (* for laziness assume, two simple csvs, then more csvs *)
+  let parse row =
+    match row with
+    | csv_dir :: simple1 :: simple2 :: rest ->
+        { csv_dir
+        ; simple_csvs_basenames = [ simple1; simple2 ]
+        ; more_csvs_basenames = rest
+        }
+    | _ ->
+        failwith "Parse error, unexpected config format"
+
+  let read_config filename =
+    match Csv.load filename with
+    | x :: [] ->
+        parse x
+    | _ ->
+        failwith "Unexpected format for config.csv"
+
+  let load t =
+    let load' names =
+      List.map names ~f:(fun basename -> Csv.load (t.csv_dir ^ basename))
+    in
+
+    let simples = load' t.simple_csvs_basenames in
+    let mores = load' t.more_csvs_basenames in
+    (simples, mores)
+end
