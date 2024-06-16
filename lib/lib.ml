@@ -32,6 +32,10 @@ module Lot_entry = struct
 
   let date t = t.date
 
+  module Compare_earliest = struct
+    let compare x x' = Time_ns.compare (date x) (date x')
+  end
+
   exception ParseError of string
 
   module Parse = struct
@@ -233,12 +237,92 @@ module Lot = struct
   let view at t =
     match t with Static e -> e | Vesting (timing, e) -> synthesize at timing e
 
+  let view_unsafe = `Comment_why_its_safe (view Lot_entry.dummy_date)
+
+  module Compare_earliest = struct
+    let compare x x' =
+      (* safe because we don't care about amounts here, only the dates *)
+      let (`Comment_why_its_safe v) = view_unsafe in
+      Lot_entry.compare (v x) (v x')
+  end
+
   let s e = Static e
 
   let v1 at (f : Lot_entry.t -> 'a) t = f (view at t)
 
   let v2 at (f : Lot_entry.t -> Lot_entry.t -> 'a) t1 t2 =
     f (view at t1) (view at t2)
+end
+
+module Demux = struct
+  type 'a t = 'a list list
+
+  let demux ~compare t =
+    let rec go lotss build =
+      let better (i, x) best_so_far =
+        match best_so_far with
+        | None ->
+            (i, x)
+        | Some (i', x') ->
+            if compare x x' <= 0 then (i, x) else (i', x')
+      in
+
+      let best : (int * 'a) option ref = ref None in
+      List.iteri lotss ~f:(fun i lots ->
+          match lots with
+          | [] ->
+              ()
+          | x :: _ ->
+              best := Some (better (i, x) !best) ) ;
+
+      match !best with
+      | None ->
+          List.rev build
+      | Some (j, lot) ->
+          let lotss' =
+            List.filter_mapi lotss ~f:(fun i lots ->
+                match lots with
+                | [] ->
+                    None
+                | x :: xs ->
+                    if Int.equal i j then Some xs else Some (x :: xs) )
+          in
+          go lotss' (lot :: build)
+    in
+    go t []
+
+  let%test_module "Demux" =
+    ( module struct
+      let%test_unit "demuxes earliest lots first" =
+        let a' = Lot_entry.For_tests.zero in
+        let b' =
+          { a' with
+            Lot_entry.date =
+              Time_ns.add Lot_entry.For_tests.zero.date
+                (Time_ns.Span.of_min 10.)
+          }
+        in
+        let c' =
+          { b' with
+            Lot_entry.date =
+              Time_ns.add Lot_entry.For_tests.zero.date
+                (Time_ns.Span.of_min 10.)
+          }
+        in
+        let a = Lot.Static a' in
+        let b = Lot.Static b' in
+        let c = Lot.Static c' in
+
+        [%test_eq: Lot.t list]
+          (demux ~compare:Lot.Compare_earliest.compare [ [ a; c ]; [ a; b ] ])
+          [ a; a; b; c ]
+
+      let%test_unit "demuxes ints properly" =
+        [%test_eq: int list]
+          (demux ~compare:Int.compare
+             [ [ 3; 4; 10; 20 ]; [ 1; 2; 10; 200; 300 ]; [ 2; 4; 6; 8 ] ] )
+          [ 1; 2; 2; 3; 4; 4; 6; 8; 10; 10; 20; 200; 300 ]
+    end )
 end
 
 module Heap = Hash_heap.Make (Id)
