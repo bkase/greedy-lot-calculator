@@ -5,6 +5,7 @@ open Core
 module Config = struct
   type t =
     { csv_dir : string
+    ; synthetic : string
     ; simple_csvs_basenames : string list
     ; more_csvs_basenames : string list
     }
@@ -12,8 +13,9 @@ module Config = struct
   (* for laziness assume, two simple csvs, then more csvs *)
   let parse row =
     match row with
-    | csv_dir :: simple1 :: simple2 :: rest ->
+    | csv_dir :: synthetic :: simple1 :: simple2 :: rest ->
         { csv_dir
+        ; synthetic
         ; simple_csvs_basenames = [ simple1; simple2 ]
         ; more_csvs_basenames = rest
         }
@@ -34,5 +36,6 @@ module Config = struct
 
     let simples = load' t.simple_csvs_basenames in
     let mores = load' t.more_csvs_basenames in
-    (simples, mores)
+    let synthetic = List.hd_exn (load' [ t.synthetic ]) in
+    (synthetic, simples, mores)
 end

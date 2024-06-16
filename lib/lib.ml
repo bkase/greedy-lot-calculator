@@ -115,6 +115,28 @@ module Timing = struct
     ; vesting_increment : Bignum.t
     }
   [@@deriving hash, sexp, compare]
+
+  module Parse = struct
+    let parse row =
+      match row with
+      | [ initial_minimum_balance; cliff_time; cliff_amount; vesting_increment ]
+        ->
+          { initial_minimum_balance = Bignum.of_string initial_minimum_balance
+          ; cliff_time = Int.of_string cliff_time
+          ; cliff_amount = Bignum.of_string cliff_amount
+          ; vesting_increment = Bignum.of_string vesting_increment
+          }
+      | _ ->
+          failwith "Parse error on timings"
+  end
+
+  let initial_entry t =
+    { Lot_entry.amount = t.initial_minimum_balance
+    ; price = Bignum.zero
+    ; metadata = Some "synthetic"
+    ; id = Id.next ()
+    ; date = Constants.genesis_time
+    }
 end
 
 module Lot = struct
