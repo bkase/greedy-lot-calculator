@@ -5,6 +5,8 @@ module Constants = struct
   let genesis_time = Time_ns.of_string_with_utc_offset "2021-03-17T00:00:00Z"
 
   let slot_time_mins = 3
+
+  let year_in_mins = 525600
 end
 
 module Id : sig
@@ -22,6 +24,7 @@ end
 module Lot_entry = struct
   type t =
     { id : Id.t
+    ; direction : [ `In of [ `Taxable | `Non_taxable of [ `Z | `Sz ] ] | `Out ]
     ; date : Time_ns.Alternate_sexp.t
     ; amount : Bignum.t
     ; price : Bignum.t
@@ -40,8 +43,9 @@ module Lot_entry = struct
   exception ParseError of string
 
   module Parse = struct
-    let of_triple ?metadata (date, amt, price) =
+    let of_triple ?metadata ~direction (date, amt, price) =
       { id = Id.next ()
+      ; direction
       ; date =
           Time_ns.of_string_with_utc_offset (Core.sprintf "%sT00:00:00Z" date)
       ; amount = Bignum.of_string amt
@@ -51,26 +55,32 @@ module Lot_entry = struct
 
     let of_simple ss =
       match ss with
-      | [ date; amt; price ] ->
-          of_triple (date, amt, price)
+      | [ date; amt; raw_price ] ->
+          let price =
+            let open Bignum in
+            let a = of_string amt in
+            let rp = of_string raw_price in
+            rp / a
+          in
+          of_triple ~direction:`Out (date, amt, Bignum.to_string_accurate price)
       | _ ->
           raise (ParseError "list not formatted as [date;amt;price]")
 
     let%test_unit "simple parses correctly" =
-      let _simple = of_simple [ "2021-02-07"; "181.2777"; "1.7882" ] in
+      let _simple = of_simple [ "2021-02-07"; "181.2777"; "1882" ] in
       (*Core.printf !"Parsed %{sexp: t}\n" simple*)
       ()
 
-    let of_more ss =
+    let of_more ~taxable ss =
       match ss with
       | [ date; price; _; _; _; _; _; txn_id; _; amt; _; _ ] ->
-          of_triple ~metadata:txn_id (date, amt, price)
+          of_triple ~direction:(`In taxable) ~metadata:txn_id (date, amt, price)
       | _ ->
           raise (ParseError "list not formatted as [date;price;_*7;amount]")
 
     let%test_unit "more parses correctly" =
       let _more =
-        of_more
+        of_more ~taxable:`Taxable
           [ "2021-07-08"
           ; "4.283872034873"
           ; ""
@@ -94,6 +104,7 @@ module Lot_entry = struct
   module For_tests = struct
     let zero =
       { id = Id.next ()
+      ; direction = `In `Taxable
       ; date = Time_ns.epoch
       ; amount = Bignum.zero
       ; price = Bignum.zero
@@ -132,6 +143,7 @@ module Timing = struct
 
   let initial_entry t =
     { Lot_entry.amount = t.initial_minimum_balance
+    ; direction = `In (`Non_taxable `Z)
     ; price = Bignum.zero
     ; metadata = Some "synthetic"
     ; id = Id.next ()
@@ -387,11 +399,102 @@ module Context = struct
     ; short_term_dates = oldest_date_heap ()
     ; short_term_lots = high_priced_heap ()
     ; long_term_lots = high_priced_heap ()
-    ; now = Time_ns.epoch
+    ; now = Constants.genesis_time
     ; income_tax = Bignum.zero
     ; short_gains_tax = Bignum.zero
     ; long_gains_tax = Bignum.zero
     }
+
+  let tick t x =
+    let e = Lot.view t.now x in
+    let now' = if Time_ns.(t.now < e.date) then e.date else t.now in
+
+    let rec adjust_heaps () =
+      match Heap.top t.short_term_dates with
+      | None ->
+          ()
+      | Some oldest ->
+          let oldest_e = Lot.view now' oldest in
+          if
+            Time_ns.(
+              now'
+              > add oldest_e.date
+                  (Span.of_min (Float.of_int Constants.year_in_mins)) )
+          then (
+            let key, data = Heap.pop_with_key_exn t.short_term_dates in
+            Heap.remove t.short_term_lots key ;
+            Heap.push_exn ~key ~data t.long_term_lots ;
+            adjust_heaps () )
+          else ()
+    in
+    adjust_heaps () ;
+
+    { t with now = now' }
+
+  let add_lot t x =
+    let t' = tick t x in
+    let e = Lot.view t'.now x in
+
+    Heap.push_exn ~key:e.id ~data:x t.mixed_lots ;
+    Heap.push_exn ~key:e.id ~data:x t.short_term_dates ;
+    Heap.push_exn ~key:e.id ~data:x t.short_term_lots ;
+    t'
+
+  let incr_income_tax t x =
+    let e = Lot.view t.now x in
+    { t with income_tax = Bignum.(t.income_tax + (e.price * e.amount)) }
+end
+
+module Run = struct
+  let run events =
+    let ctx = ref (Context.create ()) in
+    (* map events to a report *)
+    let report =
+      List.filter_map events ~f:(fun e ->
+          (* TODO: Assert invariants *)
+          let entry = Lot.view !ctx.now e in
+          match entry.direction with
+          | `In taxable ->
+              let old_ctx = !ctx in
+              let ctx' = Context.add_lot !ctx e in
+              let ctx'' =
+                match taxable with
+                | `Non_taxable _ ->
+                    ctx'
+                | `Taxable ->
+                    Context.incr_income_tax ctx' e
+              in
+              ctx := ctx'' ;
+              let new_year_2022 =
+                Time_ns.of_string_with_utc_offset "2022-01-01T00:00:00Z"
+              in
+              let new_year_2023 =
+                Time_ns.of_string_with_utc_offset "2023-01-01T00:00:00Z"
+              in
+              let new_year_2024 =
+                Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z"
+              in
+              let latest_2024 =
+                Time_ns.of_string_with_utc_offset "2024-06-01T00:00:00Z"
+              in
+              if
+                Time_ns.(
+                  old_ctx.now < new_year_2022 && ctx''.now >= new_year_2022 )
+                || Time_ns.(
+                     old_ctx.now < new_year_2023 && ctx''.now >= new_year_2023 )
+                || Time_ns.(
+                     old_ctx.now < new_year_2024 && ctx''.now >= new_year_2024 )
+                || Time_ns.(ctx''.now >= latest_2024)
+              then
+                Some
+                  (Core.sprintf "Income tax as of %s is now: %s\n"
+                     (Time_ns.to_string_utc ctx''.now)
+                     (Bignum.to_string_hum !ctx.income_tax) )
+              else None
+          | `Out ->
+              None )
+    in
+    report
 end
 
 let%test_module "Contexts" =

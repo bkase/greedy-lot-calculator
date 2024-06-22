@@ -7,17 +7,23 @@ module Config = struct
     { csv_dir : string
     ; synthetic : string
     ; simple_csvs_basenames : string list
-    ; more_csvs_basenames : string list
+          (* all_sends is the union of basis_non_zero_no_tax + basis_zero_no_tax *)
+    ; all_sends : string
+    ; basis_non_zero_no_tax : string
+    ; basis_non_zero_tax : string list
     }
 
   (* for laziness assume, two simple csvs, then more csvs *)
   let parse row =
     match row with
-    | csv_dir :: synthetic :: simple1 :: simple2 :: rest ->
+    | csv_dir :: synthetic :: simple_out1 :: simple_out2 :: all_sends
+      :: basis_non_zero_no_tax :: rest_income_tax ->
         { csv_dir
         ; synthetic
-        ; simple_csvs_basenames = [ simple1; simple2 ]
-        ; more_csvs_basenames = rest
+        ; all_sends
+        ; simple_csvs_basenames = [ simple_out1; simple_out2 ]
+        ; basis_non_zero_no_tax
+        ; basis_non_zero_tax = rest_income_tax
         }
     | _ ->
         failwith "Parse error, unexpected config format"
@@ -30,12 +36,38 @@ module Config = struct
         failwith "Unexpected format for config.csv"
 
   let load t =
-    let load' names =
-      List.map names ~f:(fun basename -> Csv.load (t.csv_dir ^ basename))
-    in
+    let load' basename = Csv.load (t.csv_dir ^ basename) in
+    let load'' names = List.map names ~f:load' in
 
-    let simples = load' t.simple_csvs_basenames in
-    let mores = load' t.more_csvs_basenames in
-    let synthetic = List.hd_exn (load' [ t.synthetic ]) in
-    (synthetic, simples, mores)
+    let simple_outs = load'' t.simple_csvs_basenames in
+    let basis_non_zero_no_tax = load' t.basis_non_zero_no_tax in
+    let all_sends = load' t.all_sends in
+    let basis_zero_no_tax =
+      (* O(n^2) but it's probably fine *)
+      let rec go needles build =
+        match needles with
+        | [] ->
+            List.rev build
+        | x :: xs -> (
+            match
+              List.find
+                ~f:(fun y -> [%equal: string List.t] x y)
+                basis_non_zero_no_tax
+            with
+            | None ->
+                go xs (x :: build)
+            | Some _ ->
+                go xs build )
+      in
+      go all_sends []
+    in
+    let basis_non_zero_taxes = load'' t.basis_non_zero_tax in
+    let synthetic = load' t.synthetic in
+
+    ( synthetic
+    , [ ([ basis_zero_no_tax ], `In (`Non_taxable `Z))
+      ; (simple_outs, `Out)
+      ; ([ basis_non_zero_no_tax ], `In (`Non_taxable `Sz))
+      ; (basis_non_zero_taxes, `In `Taxable)
+      ] )
 end
