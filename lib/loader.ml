@@ -9,21 +9,21 @@ module Config = struct
     ; simple_csvs_basenames : string list
           (* all_sends is the union of basis_non_zero_no_tax + basis_zero_no_tax *)
     ; all_sends : string
-    ; basis_non_zero_no_tax : string
-    ; basis_non_zero_tax : string list
+    ; basis_non_zero_incoming : string
+    ; basis_non_zero_rewards : string list
     }
 
   (* for laziness assume, two simple csvs, then more csvs *)
   let parse row =
     match row with
     | csv_dir :: synthetic :: simple_out1 :: simple_out2 :: all_sends
-      :: basis_non_zero_no_tax :: rest_income_tax ->
+      :: basis_non_zero_incoming :: rest_rewards ->
         { csv_dir
         ; synthetic
         ; all_sends
         ; simple_csvs_basenames = [ simple_out1; simple_out2 ]
-        ; basis_non_zero_no_tax
-        ; basis_non_zero_tax = rest_income_tax
+        ; basis_non_zero_incoming
+        ; basis_non_zero_rewards = rest_rewards
         }
     | _ ->
         failwith "Parse error, unexpected config format"
@@ -40,7 +40,7 @@ module Config = struct
     let load'' names = List.map names ~f:load' in
 
     let simple_outs = load'' t.simple_csvs_basenames in
-    let basis_non_zero_no_tax = load' t.basis_non_zero_no_tax in
+    let basis_non_zero_incoming = load' t.basis_non_zero_incoming in
     let all_sends = load' t.all_sends in
     let basis_zero_no_tax =
       (* O(n^2) but it's probably fine *)
@@ -52,7 +52,7 @@ module Config = struct
             match
               List.find
                 ~f:(fun y -> [%equal: string List.t] x y)
-                basis_non_zero_no_tax
+                basis_non_zero_incoming
             with
             | None ->
                 go xs (x :: build)
@@ -61,13 +61,13 @@ module Config = struct
       in
       go all_sends []
     in
-    let basis_non_zero_taxes = load'' t.basis_non_zero_tax in
+    let basis_non_zero_rewards = load'' t.basis_non_zero_rewards in
     let synthetic = load' t.synthetic in
 
     ( synthetic
     , [ ([ basis_zero_no_tax ], `In (`Non_taxable `Z))
       ; (simple_outs, `Out)
-      ; ([ basis_non_zero_no_tax ], `In (`Non_taxable `Sz))
-      ; (basis_non_zero_taxes, `In `Taxable)
+      ; ([ basis_non_zero_incoming ], `In `Taxable)
+      ; (basis_non_zero_rewards, `In `Taxable)
       ] )
 end

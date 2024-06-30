@@ -155,6 +155,13 @@ module Lot = struct
   type t = Static of Lot_entry.t | Vesting of Timing.t * Lot_entry.t
   [@@deriving hash, sexp, compare]
 
+  let update_entry t e =
+    match t with
+    | Static _ ->
+        Static e
+    | Vesting (timing, _) ->
+        Vesting (timing, e)
+
   let time_to_slot at =
     let span = Time_ns.abs_diff at Constants.genesis_time in
     Int.of_float
@@ -443,6 +450,49 @@ module Context = struct
   let incr_income_tax t x =
     let e = Lot.view t.now x in
     { t with income_tax = Bignum.(t.income_tax + (e.price * e.amount)) }
+
+  let incr_short_gains_tax t by =
+    { t with short_gains_tax = Bignum.(t.short_gains_tax + by) }
+
+  let rec keep_draining t full_x price amount_remaining =
+    let open Bignum in
+    if amount_remaining <= zero then t
+    else
+      let best_mixed' = Heap.top_exn t.mixed_lots in
+      let best_mixed = Lot.view t.now best_mixed' in
+      if best_mixed.price >= price then (
+        let key, x = Heap.pop_with_key_exn t.mixed_lots in
+        let e = Lot.view t.now x in
+
+        Heap.remove t.short_term_dates key ;
+        Heap.remove t.short_term_lots key ;
+        Heap.remove t.long_term_lots key ;
+
+        let remainder = amount_remaining - e.amount in
+        if remainder < zero then (
+          (* we didn't consume the full top entry *)
+          let new_e =
+            { e with Lot_entry.amount = e.amount - amount_remaining }
+          in
+          let new_x = Lot.update_entry x new_e in
+          let t' = add_lot t new_x in
+          let t'' = tick t' full_x in
+          (* this is always a loss *)
+          assert (price - e.price <= zero) ;
+          incr_short_gains_tax t'' (amount_remaining * (price - e.price)) )
+        else (
+          (* we did consume the full top entry, so we need to keep draining *)
+          assert (price - e.price <= zero) ;
+          let t' =
+            incr_short_gains_tax t (amount_remaining * (price - e.price))
+          in
+          keep_draining t' full_x price remainder ) )
+      else failwith "it's a gain, undefined"
+
+  let sell t x =
+    let t' = tick t x in
+    let e = Lot.view t'.now x in
+    keep_draining t' x e.price e.amount
 end
 
 module Run = struct
@@ -492,6 +542,8 @@ module Run = struct
                      (Bignum.to_string_hum !ctx.income_tax) )
               else None
           | `Out ->
+              let ctx' = Context.sell !ctx e in
+              ctx := ctx' ;
               None )
     in
     report
