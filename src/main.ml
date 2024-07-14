@@ -21,9 +21,18 @@ let () =
   in
   let input =
     Demux.demux ~compare:Lot.Compare_earliest.compare
-      ( synthetic_lots
-      :: (rest_lots |> List.map ~f:(List.map ~f:(fun e -> Lot.Static e))) )
+      (rest_lots |> List.map ~f:(List.map ~f:(fun e -> Lot.Static e)))
   in
-  Core.printf !"%{sexp: Lot.t list}\n" input ;
-  let report = Run.run input in
+  let synthetics =
+    match synthetic_lots with
+    | [] ->
+        failwith "unexpected synthetics"
+    | [ _x ] ->
+        failwith "unexpected synthetics"
+    | [ x; y ] ->
+        (x, y)
+    | _ ->
+        failwith "unexpected synthetics"
+  in
+  let report = Run.run ~synthetics input in
   Core.printf !"%{sexp: string list}\n" report
