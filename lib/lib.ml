@@ -21,6 +21,8 @@ end = struct
   let next () = incr ram ; !ram
 end
 
+let or_else a = function None -> a | Some a' -> a'
+
 module Lot_entry = struct
   type t =
     { id : Id.t
@@ -29,6 +31,7 @@ module Lot_entry = struct
     ; amount : Bignum.t
     ; price : Bignum.t
     ; metadata : string option
+    ; witheld : Bignum.t
     }
   [@@deriving hash, sexp, compare]
 
@@ -43,7 +46,7 @@ module Lot_entry = struct
   exception ParseError of string
 
   module Parse = struct
-    let of_triple ?metadata ~direction (date, amt, price) =
+    let of_triple ?witheld ?metadata ~direction (date, amt, price) =
       { id = Id.next ()
       ; direction
       ; date =
@@ -51,6 +54,7 @@ module Lot_entry = struct
       ; amount = Bignum.of_string amt
       ; price = Bignum.of_string price
       ; metadata
+      ; witheld = Option.map ~f:Bignum.of_string witheld |> or_else Bignum.zero
       }
 
     let of_simple ss =
@@ -73,10 +77,16 @@ module Lot_entry = struct
 
     let of_more ~taxable ss =
       match ss with
+      (* minaexplorer format *)
       | [ date; price; _; _; _; _; _; txn_id; _; amt; _; _ ] ->
           of_triple ~direction:(`In taxable) ~metadata:txn_id (date, amt, price)
+      (* pulley format *)
+      | [ date; price; amt; witheld; txn_id ] ->
+          of_triple ~direction:(`In taxable) ~witheld ~metadata:txn_id
+            (date, amt, price)
       | _ ->
-          raise (ParseError "list not formatted as [date;price;_*7;amount]")
+          raise
+            (ParseError "list not formatted as [date;price;_*7;amount] (or alt)")
 
     let%test_unit "more parses correctly" =
       let _more =
@@ -109,6 +119,7 @@ module Lot_entry = struct
       ; amount = Bignum.zero
       ; price = Bignum.zero
       ; metadata = None
+      ; witheld = Bignum.zero
       }
 
     let another_priced t p = { t with id = Id.next (); price = p }
@@ -148,6 +159,7 @@ module Timing = struct
     ; metadata = Some "synthetic"
     ; id = Id.next ()
     ; date = Constants.genesis_time
+    ; witheld = Bignum.zero
     }
 end
 
@@ -390,6 +402,7 @@ module Context = struct
     ; synthetics : Lot.t * Lot.t
     ; now : Time_ns.Alternate_sexp.t
     ; income_tax : Bignum.t
+    ; witheld_total : Bignum.t
     ; short_gains_tax : Bignum.t
     ; long_gains_tax : Bignum.t
     }
@@ -416,6 +429,7 @@ module Context = struct
     ; synthetics
     ; now = Constants.genesis_time
     ; income_tax = Bignum.zero
+    ; witheld_total = Bignum.zero
     ; short_gains_tax = Bignum.zero
     ; long_gains_tax = Bignum.zero
     }
@@ -467,7 +481,10 @@ module Context = struct
 
   let incr_income_tax t x =
     let e = Lot.view t.now x in
-    { t with income_tax = Bignum.(t.income_tax + (e.price * e.amount)) }
+    { t with
+      income_tax = Bignum.(t.income_tax + (e.price * e.amount))
+    ; witheld_total = Bignum.(t.witheld_total + (e.price * e.witheld))
+    }
 
   let incr_gains_tax which t by =
     match which with
@@ -610,11 +627,23 @@ module Run = struct
                 || Time_ns.(
                      old_ctx.now < new_year_2024 && ctx''.now >= new_year_2024 )
                 || Time_ns.(ctx''.now >= latest_2024)
-              then
+              then (
+                Core.printf "Income tax as of %s is now: %s (witheld %s )\n"
+                  (Time_ns.to_string_utc ctx''.now)
+                  (Bignum.to_string_hum !ctx.income_tax)
+                  (Bignum.to_string_hum !ctx.witheld_total) ;
+                Core.printf "Short gains as of %s is now: %s\n"
+                  (Time_ns.to_string_utc ctx''.now)
+                  (Bignum.to_string_hum !ctx.short_gains_tax) ;
+                Core.printf "Long gains as of %s is now: %s\n"
+                  (Time_ns.to_string_utc ctx''.now)
+                  (Bignum.to_string_hum !ctx.long_gains_tax) ;
+
                 Some
-                  (Core.sprintf "Income tax as of %s is now: %s\n"
+                  (Core.sprintf "Income tax as of %s is now: %s (witheld %s )\n"
                      (Time_ns.to_string_utc ctx''.now)
-                     (Bignum.to_string_hum !ctx.income_tax) )
+                     (Bignum.to_string_hum !ctx.income_tax)
+                     (Bignum.to_string_hum !ctx.witheld_total) ) )
               else None
           | `Out ->
               Core.printf !"Processing sell %{sexp: Lot_entry.t}\n" entry ;
