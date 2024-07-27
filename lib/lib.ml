@@ -416,12 +416,6 @@ module Context = struct
     Heap.create (v' (fun e1 e2 -> Time_ns.compare e1.date e2.date))
 
   let create ~synthetics () =
-    let high_priced_heap () =
-      Heap.create (v' (fun e1 e2 -> Bignum.compare e1.price e2.price))
-    in
-    let oldest_date_heap () =
-      Heap.create (v' (fun e1 e2 -> Time_ns.compare e1.date e2.date))
-    in
     { mixed_lots = high_priced_heap ()
     ; short_term_dates = oldest_date_heap ()
     ; short_term_lots = high_priced_heap ()
@@ -433,6 +427,26 @@ module Context = struct
     ; short_gains_tax = Bignum.zero
     ; long_gains_tax = Bignum.zero
     }
+
+  let heap_to_list h =
+    let h' = Heap.copy h in
+    let rec go xs =
+      if Heap.length h' > 0 then go (Heap.pop_with_key_exn h' :: xs) else xs
+    in
+    List.rev (go [])
+
+  (* for now printf, later sprintf *)
+  let debug_view t =
+    let in_order = heap_to_list t.mixed_lots in
+    Core.printf "[\n" ;
+    List.iter in_order ~f:(fun (id, x) ->
+        let e = Lot.view t.now x in
+        let s = Bignum.to_string_hum in
+        Core.printf
+          !"\t%{sexp: Id.t}:(%s @ $%s = $%s)\n"
+          id (s e.amount) (s e.price)
+          (s Bignum.(e.amount * e.price)) ) ;
+    Core.printf "]\n"
 
   let tick t x =
     let e = Lot.view t.now x in
@@ -592,6 +606,7 @@ module Run = struct
     (* map events to a report *)
     let report =
       List.filter_map events ~f:(fun e ->
+          (*Context.debug_view !ctx ;*)
           (* TODO: Assert invariants *)
           let entry = Lot.view !ctx.now e in
           match entry.direction with
@@ -616,9 +631,6 @@ module Run = struct
               let new_year_2024 =
                 Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z"
               in
-              let latest_2024 =
-                Time_ns.of_string_with_utc_offset "2024-06-01T00:00:00Z"
-              in
               if
                 Time_ns.(
                   old_ctx.now < new_year_2022 && ctx''.now >= new_year_2022 )
@@ -626,24 +638,32 @@ module Run = struct
                      old_ctx.now < new_year_2023 && ctx''.now >= new_year_2023 )
                 || Time_ns.(
                      old_ctx.now < new_year_2024 && ctx''.now >= new_year_2024 )
-                || Time_ns.(ctx''.now >= latest_2024)
               then (
                 Core.printf "Income tax as of %s is now: %s (witheld %s )\n"
                   (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum !ctx.income_tax)
-                  (Bignum.to_string_hum !ctx.witheld_total) ;
+                  (Bignum.to_string_hum ctx''.income_tax)
+                  (Bignum.to_string_hum ctx''.witheld_total) ;
                 Core.printf "Short gains as of %s is now: %s\n"
                   (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum !ctx.short_gains_tax) ;
+                  (Bignum.to_string_hum ctx''.short_gains_tax) ;
                 Core.printf "Long gains as of %s is now: %s\n"
                   (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum !ctx.long_gains_tax) ;
+                  (Bignum.to_string_hum ctx''.long_gains_tax) ;
 
+                (* reset taxes for new year *)
+                (ctx :=
+                   Bignum.
+                     { ctx'' with
+                       income_tax = zero
+                     ; witheld_total = zero
+                     ; short_gains_tax = zero
+                     ; long_gains_tax = zero
+                     } ) ;
                 Some
                   (Core.sprintf "Income tax as of %s is now: %s (witheld %s )\n"
                      (Time_ns.to_string_utc ctx''.now)
-                     (Bignum.to_string_hum !ctx.income_tax)
-                     (Bignum.to_string_hum !ctx.witheld_total) ) )
+                     (Bignum.to_string_hum ctx''.income_tax)
+                     (Bignum.to_string_hum ctx''.witheld_total) ) )
               else None
           | `Out ->
               Core.printf !"Processing sell %{sexp: Lot_entry.t}\n" entry ;
@@ -656,13 +676,6 @@ end
 
 let%test_module "Contexts" =
   ( module struct
-    let heap_to_list h =
-      let h' = Heap.copy h in
-      let rec go xs =
-        if Heap.length h' > 0 then go (Heap.pop_exn h' :: xs) else xs
-      in
-      List.rev (go [])
-
     let%test_unit "high priced heap does high prices first" =
       let h = Context.high_priced_heap () in
       let add e =
@@ -681,8 +694,8 @@ let%test_module "Contexts" =
       add (z (Bignum.of_int 20)) ;
       add (z (Bignum.of_int 1)) ;
       [%test_eq: Bignum.t List.t]
-        ( heap_to_list h
-        |> List.map ~f:(fun s ->
+        ( Context.heap_to_list h
+        |> List.map ~f:(fun (_, s) ->
                Lot.view Lot_entry.dummy_date s |> Lot_entry.price ) )
         Bignum.[ of_int 20; of_int 10; of_int 5; of_int 1; of_int 0 ]
 
@@ -711,8 +724,8 @@ let%test_module "Contexts" =
       add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 3.))) ;
       add (z (Time_ns.add ez.Lot_entry.date (Time_ns.Span.of_hr 5.))) ;
       [%test_eq: Time_ns.Alternate_sexp.t List.t]
-        ( heap_to_list h
-        |> List.map ~f:(fun s ->
+        ( Context.heap_to_list h
+        |> List.map ~f:(fun (_, s) ->
                Lot.view Lot_entry.dummy_date s |> Lot_entry.date ) )
         Time_ns.[ epoch; timed 3; timed 5; timed2 10 ]
   end )
