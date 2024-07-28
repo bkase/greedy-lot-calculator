@@ -393,6 +393,66 @@ end
 
 module Heap = Hash_heap.Make (Id)
 
+module Log = struct
+  module Extra = struct
+    type t =
+      { witheld : Bignum.t
+      ; income : Bignum.t
+      ; short_gains : Bignum.t
+      ; long_gains : Bignum.t
+      ; ids_consumed : Id.t list
+      }
+    [@@deriving sexp]
+
+    let income dollars witheld =
+      let open Bignum in
+      { witheld
+      ; income = dollars
+      ; short_gains = zero
+      ; long_gains = zero
+      ; ids_consumed = []
+      }
+
+    let zero = income Bignum.zero Bignum.zero
+
+    let incr_gains_tax which t by key =
+      match which with
+      | `Short ->
+          { t with
+            short_gains = Bignum.(t.short_gains + by)
+          ; ids_consumed = key :: t.ids_consumed
+          }
+      | `Long ->
+          { t with
+            long_gains = Bignum.(t.long_gains + by)
+          ; ids_consumed = key :: t.ids_consumed
+          }
+  end
+
+  module Item = struct
+    type t = Lot_entry.t * Extra.t
+
+    let to_csv : t -> string list =
+     fun (e, x) ->
+      [ e.id |> Id.sexp_of_t |> Sexp.to_string_hum
+      ; e.date |> Time_ns.to_string_utc
+      ; e.price |> Bignum.to_string_hum
+      ; e.amount |> Bignum.to_string_hum
+      ; Bignum.(e.price * e.amount) |> Bignum.to_string_hum
+      ; x.income |> Bignum.to_string_hum
+      ; x.witheld |> Bignum.to_string_hum
+      ; x.short_gains |> Bignum.to_string_hum
+      ; x.long_gains |> Bignum.to_string_hum
+      ; x.ids_consumed
+        |> List.map ~f:(fun id -> Id.sexp_of_t id |> Sexp.to_string_hum)
+        |> List.intersperse ~sep:","
+        |> List.fold_left ~init:"" ~f:(fun acc x -> acc ^ x)
+      ]
+  end
+
+  let to_csv t = List.map t ~f:Item.to_csv
+end
+
 module Context = struct
   type t =
     { mixed_lots : Lot.t Heap.t
@@ -401,10 +461,6 @@ module Context = struct
     ; long_term_lots : Lot.t Heap.t
     ; synthetics : Lot.t * Lot.t
     ; now : Time_ns.Alternate_sexp.t
-    ; income_tax : Bignum.t
-    ; witheld_total : Bignum.t
-    ; short_gains_tax : Bignum.t
-    ; long_gains_tax : Bignum.t
     }
 
   let v' = Lot.v2 Lot_entry.dummy_date
@@ -422,10 +478,6 @@ module Context = struct
     ; long_term_lots = high_priced_heap ()
     ; synthetics
     ; now = Constants.genesis_time
-    ; income_tax = Bignum.zero
-    ; witheld_total = Bignum.zero
-    ; short_gains_tax = Bignum.zero
-    ; long_gains_tax = Bignum.zero
     }
 
   let heap_to_list h =
@@ -493,76 +545,66 @@ module Context = struct
     Heap.push_exn ~key:e.id ~data:x t.short_term_lots ;
     tick t' x
 
-  let incr_income_tax t x =
+  let extra_incoming t x =
     let e = Lot.view t.now x in
-    { t with
-      income_tax = Bignum.(t.income_tax + (e.price * e.amount))
-    ; witheld_total = Bignum.(t.witheld_total + (e.price * e.witheld))
-    }
+    Log.Extra.income Bignum.(e.price * e.amount) Bignum.(e.price * e.witheld)
 
-  let incr_gains_tax which t by =
-    match which with
-    | `Short ->
-        { t with short_gains_tax = Bignum.(t.short_gains_tax + by) }
-    | `Long ->
-        { t with long_gains_tax = Bignum.(t.long_gains_tax + by) }
-
-  let rec keep_draining t full_x price amount_remaining =
+  let rec keep_draining t full_x price amount_remaining extra =
     let open Bignum in
-    let use_and_lose which use loses =
+    let use_and_lose which use loses extra =
       let key, x = Heap.pop_with_key_exn use in
       let e = Lot.view t.now x in
       let remainder = amount_remaining - e.amount in
-      Core.printf
-        !"Remainder amount_remaining:%{sexp: Bignum.t} - e.amount:%{sexp: \
-          Bignum.t} = %{sexp: Bignum.t}; e is %{sexp: Lot_entry.t}\n"
-        amount_remaining e.amount remainder e ;
 
       List.iter loses ~f:(fun l -> Heap.remove l key) ;
 
       if remainder <= zero then
-        (* we didn't consume the full top entry *)
-        ( incr_gains_tax which t (amount_remaining * (price - e.price))
+        ( (* we didn't consume the full top entry *)
+          t
         , x
-        , amount_remaining )
+        , amount_remaining
+        , Log.Extra.incr_gains_tax which extra
+            (amount_remaining * (price - e.price))
+            key )
       else
         (* we did consume the full top entry, so we need to keep draining *)
-        let t' =
-          incr_gains_tax which t (amount_remaining * (price - e.price))
+        let extra' =
+          Log.Extra.incr_gains_tax which extra
+            (e.amount * (price - e.price))
+            key
         in
-        keep_draining t' full_x price remainder
+        keep_draining t full_x price remainder extra'
     in
 
     assert (amount_remaining >= zero) ;
-    if amount_remaining <= zero then (t, full_x, amount_remaining)
+    if amount_remaining <= zero then (t, full_x, amount_remaining, extra)
     else
       let key, best_mixed' = Heap.top_with_key_exn t.mixed_lots in
-      Core.printf !"Popped this %{sexp: Lot.t}\n" best_mixed' ;
       let best_mixed = Lot.view t.now best_mixed' in
-      Core.printf
-        !"When viewed at %s, it's %{sexp: Lot_entry.t}\n"
-        (Time_ns.to_string_utc t.now)
-        best_mixed ;
       (* this is a loss, so just pick the largest one (short or long) *)
       if best_mixed.price >= price then (
         match Heap.find t.long_term_lots key with
         | Some _ ->
             use_and_lose `Long t.long_term_lots
               [ t.short_term_dates; t.short_term_lots; t.mixed_lots ]
+              extra
         | None ->
             assert (Heap.find t.short_term_lots key |> Option.is_some) ;
 
             use_and_lose `Short t.short_term_lots
-              [ t.short_term_dates; t.long_term_lots; t.mixed_lots ] )
+              [ t.short_term_dates; t.long_term_lots; t.mixed_lots ]
+              extra )
       else if
         (* if it's a gain, choose the best lot to take from [prefer long] *)
         Int.(Heap.length t.long_term_lots > 0)
       then
         use_and_lose `Long t.long_term_lots
           [ t.short_term_dates; t.short_term_lots; t.mixed_lots ]
+          extra
       else
         use_and_lose `Short t.short_term_lots
           [ t.short_term_dates; t.long_term_lots; t.mixed_lots ]
+          extra
 
   let sell t x =
     (* prelude, add synthetics to the heap *)
@@ -572,11 +614,18 @@ module Context = struct
     in
 
     let e = Lot.view t'.now x in
-    let t'', last_x, amount_remaining = keep_draining t' x e.price e.amount in
+    let t'', last_x, amount_remaining, extra =
+      keep_draining t' x e.price e.amount Log.Extra.zero
+    in
 
-    Core.printf
-      !"Last_x %{sexp: Lot.t} amount_remaining:%{sexp: Bignum.t}\n"
-      last_x amount_remaining ;
+    ( if Bignum.(extra.short_gains > e.price * e.amount) then
+        let open Bignum in
+        failwithf
+          !"Short gains %s , %s * %s = %s\n"
+          (to_string_hum extra.short_gains)
+          (to_string_hum e.price) (to_string_hum e.amount)
+          (to_string_hum (e.price * e.amount))
+          () ) ;
 
     (* post-lude, remove synthetics from heap *)
     let t''' =
@@ -585,19 +634,20 @@ module Context = struct
     in
 
     (* add back the remainder, adjusted or modify the synthetic *)
-    if Bignum.(amount_remaining <= zero) then t'''
+    if Bignum.(amount_remaining <= zero) then (t''', extra)
     else if Lot.is_synthetic last_x then
       let s1, s2 = t'''.synthetics in
-      { t''' with
-        synthetics =
-          ( ( if Id.equal (Lot.id last_x) (Lot.id s1) then
-                Lot.adjust_amount_by s1 amount_remaining
-              else s1 )
-          , if Id.equal (Lot.id last_x) (Lot.id s2) then
-              Lot.adjust_amount_by s2 amount_remaining
-            else s2 )
-      }
-    else add_lot t''' (Lot.adjust_amount_by last_x amount_remaining)
+      ( { t''' with
+          synthetics =
+            ( ( if Id.equal (Lot.id last_x) (Lot.id s1) then
+                  Lot.adjust_amount_by s1 amount_remaining
+                else s1 )
+            , if Id.equal (Lot.id last_x) (Lot.id s2) then
+                Lot.adjust_amount_by s2 amount_remaining
+              else s2 )
+        }
+      , extra )
+    else (add_lot t''' (Lot.adjust_amount_by last_x amount_remaining), extra)
 end
 
 module Run = struct
@@ -611,17 +661,16 @@ module Run = struct
           let entry = Lot.view !ctx.now e in
           match entry.direction with
           | `In taxable ->
-              Core.printf !"Processing incoming %{sexp: Lot_entry.t}\n" entry ;
               let old_ctx = !ctx in
               let ctx' = Context.add_lot !ctx e in
-              let ctx'' =
+              let extra =
                 match taxable with
                 | `Non_taxable _ ->
-                    ctx'
+                    Log.Extra.zero
                 | `Taxable ->
-                    Context.incr_income_tax ctx' e
+                    Context.extra_incoming ctx' e
               in
-              ctx := ctx'' ;
+              ctx := ctx' ;
               let new_year_2022 =
                 Time_ns.of_string_with_utc_offset "2022-01-01T00:00:00Z"
               in
@@ -633,45 +682,19 @@ module Run = struct
               in
               if
                 Time_ns.(
-                  old_ctx.now < new_year_2022 && ctx''.now >= new_year_2022 )
+                  old_ctx.now < new_year_2022 && ctx'.now >= new_year_2022 )
                 || Time_ns.(
-                     old_ctx.now < new_year_2023 && ctx''.now >= new_year_2023 )
+                     old_ctx.now < new_year_2023 && ctx'.now >= new_year_2023 )
                 || Time_ns.(
-                     old_ctx.now < new_year_2024 && ctx''.now >= new_year_2024 )
-              then (
-                Core.printf "Income tax as of %s is now: %s (witheld %s )\n"
-                  (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum ctx''.income_tax)
-                  (Bignum.to_string_hum ctx''.witheld_total) ;
-                Core.printf "Short gains as of %s is now: %s\n"
-                  (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum ctx''.short_gains_tax) ;
-                Core.printf "Long gains as of %s is now: %s\n"
-                  (Time_ns.to_string_utc ctx''.now)
-                  (Bignum.to_string_hum ctx''.long_gains_tax) ;
-
-                (* reset taxes for new year *)
-                (ctx :=
-                   Bignum.
-                     { ctx'' with
-                       income_tax = zero
-                     ; witheld_total = zero
-                     ; short_gains_tax = zero
-                     ; long_gains_tax = zero
-                     } ) ;
-                Some
-                  (Core.sprintf "Income tax as of %s is now: %s (witheld %s )\n"
-                     (Time_ns.to_string_utc ctx''.now)
-                     (Bignum.to_string_hum ctx''.income_tax)
-                     (Bignum.to_string_hum ctx''.witheld_total) ) )
+                     old_ctx.now < new_year_2024 && ctx'.now >= new_year_2024 )
+              then Some (entry, extra)
               else None
           | `Out ->
-              Core.printf !"Processing sell %{sexp: Lot_entry.t}\n" entry ;
-              let ctx' = Context.sell !ctx e in
+              let ctx', extra = Context.sell !ctx e in
               ctx := ctx' ;
-              None )
+              Some (entry, extra) )
     in
-    report
+    Log.to_csv report
 end
 
 let%test_module "Contexts" =

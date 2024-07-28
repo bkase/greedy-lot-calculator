@@ -35,4 +35,18 @@ let () =
         failwith "unexpected synthetics"
   in
   let report = Run.run ~synthetics input in
-  Core.printf !"%{sexp: string list}\n" report
+
+  Csv.save "/tmp/report.csv"
+    ( [ "id"
+      ; "date"
+      ; "price"
+      ; "amount"
+      ; "dollars"
+      ; "income"
+      ; "witheld"
+      ; "short_gains"
+      ; "long_gains"
+      ; "ids_consumed"
+      ]
+    :: report ) ;
+  Core.printf "Done written to /tmp/report.csv\n"
