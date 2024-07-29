@@ -450,7 +450,117 @@ module Log = struct
       ]
   end
 
-  let to_csv t = List.map t ~f:Item.to_csv
+  module Accumulator = struct
+    type t =
+      { by_month : string * Bignum.t
+      ; by_quarter : string list * Bignum.t
+      ; by_year : string * Bignum.t
+      ; by_all : string * Bignum.t
+      }
+
+    let zero =
+      Bignum.
+        { by_month = ("2021-01", zero)
+        ; by_quarter = ([ "2021-01"; "2021-02"; "2021-03" ], zero)
+        ; by_year = ("2021", zero)
+        ; by_all = ("", zero)
+        }
+
+    let tick t now =
+      let is_within_span check_time p = p (Time_ns.to_string_utc check_time) in
+
+      let is_within_month check_time against =
+        let b = is_within_span check_time (String.is_prefix ~prefix:against) in
+        Core.printf "is within a month %s ; %s ; %b\n"
+          (Time_ns.to_string_utc check_time)
+          against b ;
+
+        b
+      in
+      let is_within_quarter check_time againsts =
+        is_within_span check_time (fun curr ->
+            List.exists againsts ~f:(fun against ->
+                String.is_prefix ~prefix:against curr ) )
+      in
+      let is_within_year check_time against =
+        is_within_span check_time (String.is_prefix ~prefix:against)
+      in
+
+      let year_to_against time = String.prefix (Time_ns.to_string_utc time) 4 in
+
+      let month_to_against time =
+        String.prefix (Time_ns.to_string_utc time) 7
+      in
+
+      let quarter_to_against time =
+        let this_month = String.prefix (Time_ns.to_string_utc time) 7 in
+        match String.split this_month ~on:'-' with
+        | [ yr; "01" ] | [ yr; "02" ] | [ yr; "03" ] ->
+            [ yr ^ "-01"; yr ^ "-02"; yr ^ "-03" ]
+        | [ yr; "04" ] | [ yr; "05" ] | [ yr; "06" ] ->
+            [ yr ^ "-04"; yr ^ "-05"; yr ^ "-06" ]
+        | [ yr; "07" ] | [ yr; "08" ] | [ yr; "09" ] ->
+            [ yr ^ "-07"; yr ^ "-08"; yr ^ "-09" ]
+        | [ yr; "10" ] | [ yr; "11" ] | [ yr; "12" ] ->
+            [ yr ^ "-10"; yr ^ "-11"; yr ^ "-12" ]
+        | _ ->
+            failwith "improper date format"
+      in
+
+      let check_within ~p ~to_against (against, x) =
+        if p now against then (against, x) else (to_against now, Bignum.zero)
+      in
+      { by_month =
+          check_within ~p:is_within_month ~to_against:month_to_against
+            t.by_month
+      ; by_quarter =
+          check_within ~p:is_within_quarter ~to_against:quarter_to_against
+            t.by_quarter
+      ; by_year =
+          check_within ~p:is_within_year ~to_against:year_to_against t.by_year
+      ; by_all = t.by_all
+      }
+
+    let add t y =
+      let f (a, b) = (a, Bignum.(b + y)) in
+      { by_month = f t.by_month
+      ; by_quarter = f t.by_quarter
+      ; by_year = f t.by_year
+      ; by_all = f t.by_all
+      }
+
+    let to_csv t =
+      [ snd t.by_month; snd t.by_quarter; snd t.by_year; snd t.by_all ]
+      |> List.map ~f:Bignum.to_string_hum
+  end
+
+  let to_csv : Item.t list -> string list list =
+   fun t ->
+    let _, b =
+      List.fold_left t
+        ~init:(Accumulator.(zero, zero, zero, zero), [])
+        ~f:(fun ((a1, a2, a3, a4), build) (e, x) ->
+          let a1', a2', a3', a4' =
+            Accumulator.
+              (tick a1 e.date, tick a2 e.date, tick a3 e.date, tick a4 e.date)
+          in
+          let acc_income = Accumulator.add a1' x.income in
+          let acc_witheld = Accumulator.add a2' x.witheld in
+          let acc_short_gains = Accumulator.add a3' x.short_gains in
+          let acc_long_gains = Accumulator.add a4' x.long_gains in
+
+          let xs =
+            ( Item.to_csv (e, x)
+            @ Accumulator.to_csv acc_income
+            @ Accumulator.to_csv acc_witheld
+            @ Accumulator.to_csv acc_short_gains
+            @ Accumulator.to_csv acc_long_gains )
+            :: build
+          in
+
+          ((acc_income, acc_witheld, acc_short_gains, acc_long_gains), xs) )
+    in
+    List.rev b
 end
 
 module Context = struct
@@ -653,15 +763,20 @@ end
 module Run = struct
   let run ~synthetics events =
     let ctx = ref (Context.create ~synthetics ()) in
-    (* map events to a report *)
-    let report =
+
+    let prefix =
+      let s1, s2 = synthetics in
+      let e1, e2 = (Lot.view !ctx.now s1, Lot.view !ctx.now s2) in
+      [ (e1, Log.Extra.zero); (e2, Log.Extra.zero) ]
+    in
+    (* map events to a log *)
+    let log =
       List.filter_map events ~f:(fun e ->
           (*Context.debug_view !ctx ;*)
           (* TODO: Assert invariants *)
           let entry = Lot.view !ctx.now e in
           match entry.direction with
           | `In taxable ->
-              let old_ctx = !ctx in
               let ctx' = Context.add_lot !ctx e in
               let extra =
                 match taxable with
@@ -671,30 +786,13 @@ module Run = struct
                     Context.extra_incoming ctx' e
               in
               ctx := ctx' ;
-              let new_year_2022 =
-                Time_ns.of_string_with_utc_offset "2022-01-01T00:00:00Z"
-              in
-              let new_year_2023 =
-                Time_ns.of_string_with_utc_offset "2023-01-01T00:00:00Z"
-              in
-              let new_year_2024 =
-                Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z"
-              in
-              if
-                Time_ns.(
-                  old_ctx.now < new_year_2022 && ctx'.now >= new_year_2022 )
-                || Time_ns.(
-                     old_ctx.now < new_year_2023 && ctx'.now >= new_year_2023 )
-                || Time_ns.(
-                     old_ctx.now < new_year_2024 && ctx'.now >= new_year_2024 )
-              then Some (entry, extra)
-              else None
+              Some (entry, extra)
           | `Out ->
               let ctx', extra = Context.sell !ctx e in
               ctx := ctx' ;
               Some (entry, extra) )
     in
-    Log.to_csv report
+    Log.to_csv (prefix @ log)
 end
 
 let%test_module "Contexts" =
