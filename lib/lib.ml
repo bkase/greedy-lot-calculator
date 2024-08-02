@@ -13,12 +13,16 @@ module Id : sig
   type t [@@deriving hash, sexp, compare, equal]
 
   val next : unit -> t
+
+  val unsafe_of_int : int -> t
 end = struct
   type t = int [@@deriving hash, sexp, compare, equal]
 
   let ram = ref 0
 
   let next () = incr ram ; !ram
+
+  let unsafe_of_int = Fn.id
 end
 
 let or_else a = function None -> a | Some a' -> a'
@@ -371,13 +375,21 @@ module Demux = struct
               Time_ns.of_string_with_utc_offset "2024-01-01T00:00:00Z"
           }
         in
+        let d' =
+          { b' with
+            Lot_entry.date =
+              Time_ns.of_string_with_utc_offset "2022-04-13T00:00:00Z"
+          }
+        in
         let a = Lot.Static a' in
         let b = Lot.Static b' in
         let c = Lot.Static c' in
+        let d = Lot.Static d' in
 
         [%test_eq: Lot.t list]
-          (demux ~compare:Lot.Compare_earliest.compare [ [ a; c ]; [ a; b ] ])
-          [ a; a; b; c ]
+          (demux ~compare:Lot.Compare_earliest.compare
+             [ [ a; c ]; [ a; b ]; [ d ] ] )
+          [ a; a; b; d; c ]
 
       let%test_unit "demuxes ints properly" =
         [%test_eq: int list]
@@ -470,12 +482,7 @@ module Log = struct
       let is_within_span check_time p = p (Time_ns.to_string_utc check_time) in
 
       let is_within_month check_time against =
-        let b = is_within_span check_time (String.is_prefix ~prefix:against) in
-        Core.printf "is within a month %s ; %s ; %b\n"
-          (Time_ns.to_string_utc check_time)
-          against b ;
-
-        b
+        is_within_span check_time (String.is_prefix ~prefix:against)
       in
       let is_within_quarter check_time againsts =
         is_within_span check_time (fun curr ->
@@ -775,6 +782,9 @@ module Run = struct
           (*Context.debug_view !ctx ;*)
           (* TODO: Assert invariants *)
           let entry = Lot.view !ctx.now e in
+          if Id.equal entry.id (Id.unsafe_of_int 10) then
+            Core.printf !"Looking at %{sexp: Lot_entry.t}\n" entry ;
+
           match entry.direction with
           | `In taxable ->
               let ctx' = Context.add_lot !ctx e in

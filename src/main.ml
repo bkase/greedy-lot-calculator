@@ -15,9 +15,13 @@ let () =
     List.bind rest ~f:(fun (csvs, direction) ->
         match direction with
         | `Out ->
-            List.map csvs ~f:(List.map ~f:Lot_entry.Parse.of_simple)
+            List.map csvs ~f:(fun l ->
+                List.map ~f:Lot_entry.Parse.of_simple l
+                |> List.sort ~compare:Lot_entry.Compare_earliest.compare )
         | `In taxable ->
-            List.map csvs ~f:(List.map ~f:(Lot_entry.Parse.of_more ~taxable)) )
+            List.map csvs ~f:(fun l ->
+                List.map l ~f:(Lot_entry.Parse.of_more ~taxable)
+                |> List.sort ~compare:Lot_entry.Compare_earliest.compare ) )
   in
   let input =
     Demux.demux ~compare:Lot.Compare_earliest.compare
