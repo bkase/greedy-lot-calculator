@@ -67,7 +67,14 @@ module Lot_entry = struct
           let price =
             let open Bignum in
             let a = of_string amt in
-            let rp = of_string raw_price in
+            let price_in =
+              match List.last (String.split ~on:'$' raw_price) with
+              | None ->
+                  raw_price
+              | Some s ->
+                  s
+            in
+            let rp = of_string price_in in
             rp / a
           in
           of_triple ~direction:`Out (date, amt, Bignum.to_string_accurate price)
