@@ -419,6 +419,10 @@ module Log = struct
       ; income : Bignum.t
       ; short_gains : Bignum.t
       ; long_gains : Bignum.t
+      ; short_basis : Bignum.t
+      ; long_basis : Bignum.t
+      ; short_sales_total : Bignum.t
+      ; long_sales_total : Bignum.t
       ; ids_consumed : Id.t list
       }
     [@@deriving sexp]
@@ -429,21 +433,35 @@ module Log = struct
       ; income = dollars
       ; short_gains = zero
       ; long_gains = zero
+      ; short_basis = zero
+      ; long_basis = zero
+      ; short_sales_total = zero
+      ; long_sales_total = zero
       ; ids_consumed = []
       }
 
     let zero = income Bignum.zero Bignum.zero
 
-    let incr_gains_tax which t by key =
+    let incr_extra t ~which ~old_price ~new_price ~net_amount ~key =
+      let gains, basis, sales_total =
+        Bignum.
+          ( (fun x -> x + (net_amount * (new_price - old_price)))
+          , (fun x -> x + (net_amount * old_price))
+          , fun x -> x + (net_amount * new_price) )
+      in
       match which with
       | `Short ->
           { t with
-            short_gains = Bignum.(t.short_gains + by)
+            short_gains = gains t.short_gains
+          ; short_basis = basis t.short_basis
+          ; short_sales_total = sales_total t.short_sales_total
           ; ids_consumed = key :: t.ids_consumed
           }
       | `Long ->
           { t with
-            long_gains = Bignum.(t.long_gains + by)
+            long_gains = gains t.long_gains
+          ; long_basis = basis t.long_basis
+          ; long_sales_total = sales_total t.long_sales_total
           ; ids_consumed = key :: t.ids_consumed
           }
   end
@@ -552,27 +570,50 @@ module Log = struct
    fun t ->
     let _, b =
       List.fold_left t
-        ~init:(Accumulator.(zero, zero, zero, zero), [])
-        ~f:(fun ((a1, a2, a3, a4), build) (e, x) ->
-          let a1', a2', a3', a4' =
+        ~init:(Accumulator.(zero, zero, zero, zero, zero, zero, zero, zero), [])
+        ~f:(fun ((a1, a2, a3, a4, a5, a6, a7, a8), build) (e, x) ->
+          let a1', a2', a3', a4', a5', a6', a7', a8' =
             Accumulator.
-              (tick a1 e.date, tick a2 e.date, tick a3 e.date, tick a4 e.date)
+              ( tick a1 e.date
+              , tick a2 e.date
+              , tick a3 e.date
+              , tick a4 e.date
+              , tick a5 e.date
+              , tick a6 e.date
+              , tick a7 e.date
+              , tick a8 e.date )
           in
           let acc_income = Accumulator.add a1' x.income in
           let acc_witheld = Accumulator.add a2' x.witheld in
           let acc_short_gains = Accumulator.add a3' x.short_gains in
           let acc_long_gains = Accumulator.add a4' x.long_gains in
+          let acc_short_basis = Accumulator.add a5' x.short_basis in
+          let acc_short_sales_total = Accumulator.add a6' x.short_sales_total in
+          let acc_long_basis = Accumulator.add a7' x.long_basis in
+          let acc_long_sales_total = Accumulator.add a8' x.long_sales_total in
 
           let xs =
             ( Item.to_csv (e, x)
             @ Accumulator.to_csv acc_income
             @ Accumulator.to_csv acc_witheld
             @ Accumulator.to_csv acc_short_gains
-            @ Accumulator.to_csv acc_long_gains )
+            @ Accumulator.to_csv acc_long_gains
+            @ Accumulator.to_csv acc_short_basis
+            @ Accumulator.to_csv acc_short_sales_total
+            @ Accumulator.to_csv acc_long_basis
+            @ Accumulator.to_csv acc_long_sales_total )
             :: build
           in
 
-          ((acc_income, acc_witheld, acc_short_gains, acc_long_gains), xs) )
+          ( ( acc_income
+            , acc_witheld
+            , acc_short_gains
+            , acc_long_gains
+            , acc_short_basis
+            , acc_short_sales_total
+            , acc_long_basis
+            , acc_long_sales_total )
+          , xs ) )
     in
     List.rev b
 end
@@ -687,15 +728,13 @@ module Context = struct
           t
         , x
         , amount_remaining
-        , Log.Extra.incr_gains_tax which extra
-            (amount_remaining * (price - e.price))
-            key )
+        , Log.Extra.incr_extra extra ~which ~old_price:e.price ~new_price:price
+            ~net_amount:amount_remaining ~key )
       else
         (* we did consume the full top entry, so we need to keep draining *)
         let extra' =
-          Log.Extra.incr_gains_tax which extra
-            (e.amount * (price - e.price))
-            key
+          Log.Extra.incr_extra extra ~which ~old_price:e.price ~new_price:price
+            ~net_amount:e.amount ~key
         in
         keep_draining t full_x price remainder extra'
     in
