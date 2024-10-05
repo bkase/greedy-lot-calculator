@@ -416,6 +416,7 @@ module Log = struct
   module Extra = struct
     type t =
       { witheld : Bignum.t
+      ; w2_income : Bignum.t
       ; income : Bignum.t
       ; short_gains : Bignum.t
       ; long_gains : Bignum.t
@@ -430,7 +431,8 @@ module Log = struct
     let income dollars witheld =
       let open Bignum in
       { witheld
-      ; income = dollars
+      ; w2_income = (if Bignum.(equal witheld zero) then zero else dollars)
+      ; income = (if Bignum.(equal witheld zero) then dollars else zero)
       ; short_gains = zero
       ; long_gains = zero
       ; short_basis = zero
@@ -477,6 +479,7 @@ module Log = struct
       ; e.amount |> Bignum.to_string_hum
       ; Bignum.(e.price * e.amount) |> Bignum.to_string_hum
       ; x.income |> Bignum.to_string_hum
+      ; x.w2_income |> Bignum.to_string_hum
       ; x.witheld |> Bignum.to_string_hum
       ; x.short_gains |> Bignum.to_string_hum
       ; x.long_gains |> Bignum.to_string_hum
@@ -570,9 +573,11 @@ module Log = struct
    fun t ->
     let _, b =
       List.fold_left t
-        ~init:(Accumulator.(zero, zero, zero, zero, zero, zero, zero, zero), [])
-        ~f:(fun ((a1, a2, a3, a4, a5, a6, a7, a8), build) (e, x) ->
-          let a1', a2', a3', a4', a5', a6', a7', a8' =
+        ~init:
+          ( Accumulator.(zero, zero, zero, zero, zero, zero, zero, zero, zero)
+          , [] )
+        ~f:(fun ((a1, a2, a3, a4, a5, a6, a7, a8, a9), build) (e, x) ->
+          let a1', a2', a3', a4', a5', a6', a7', a8', a9' =
             Accumulator.
               ( tick a1 e.date
               , tick a2 e.date
@@ -581,20 +586,23 @@ module Log = struct
               , tick a5 e.date
               , tick a6 e.date
               , tick a7 e.date
-              , tick a8 e.date )
+              , tick a8 e.date
+              , tick a9 e.date )
           in
           let acc_income = Accumulator.add a1' x.income in
-          let acc_witheld = Accumulator.add a2' x.witheld in
-          let acc_short_gains = Accumulator.add a3' x.short_gains in
-          let acc_long_gains = Accumulator.add a4' x.long_gains in
-          let acc_short_basis = Accumulator.add a5' x.short_basis in
-          let acc_short_sales_total = Accumulator.add a6' x.short_sales_total in
-          let acc_long_basis = Accumulator.add a7' x.long_basis in
-          let acc_long_sales_total = Accumulator.add a8' x.long_sales_total in
+          let acc_w2_income = Accumulator.add a2' x.w2_income in
+          let acc_witheld = Accumulator.add a3' x.witheld in
+          let acc_short_gains = Accumulator.add a4' x.short_gains in
+          let acc_long_gains = Accumulator.add a5' x.long_gains in
+          let acc_short_basis = Accumulator.add a6' x.short_basis in
+          let acc_short_sales_total = Accumulator.add a7' x.short_sales_total in
+          let acc_long_basis = Accumulator.add a8' x.long_basis in
+          let acc_long_sales_total = Accumulator.add a9' x.long_sales_total in
 
           let xs =
             ( Item.to_csv (e, x)
             @ Accumulator.to_csv acc_income
+            @ Accumulator.to_csv acc_w2_income
             @ Accumulator.to_csv acc_witheld
             @ Accumulator.to_csv acc_short_gains
             @ Accumulator.to_csv acc_long_gains
@@ -606,6 +614,7 @@ module Log = struct
           in
 
           ( ( acc_income
+            , acc_w2_income
             , acc_witheld
             , acc_short_gains
             , acc_long_gains
